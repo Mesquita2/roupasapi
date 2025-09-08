@@ -1,8 +1,8 @@
-from fastapi import FastAPI
-from pydantic import BaseModel
-import requests
+from fastapi import FastAPI # type: ignore
+from pydantic import BaseModel # type: ignore
+import requests # type: ignore
 import os
-from dotenv import load_dotenv
+from dotenv import load_dotenv  # type: ignore
 
 # Carregar variáveis do .env
 load_dotenv()
