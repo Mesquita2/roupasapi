@@ -1,14 +1,23 @@
-from fastapi import FastAPI # type: ignore
+from fastapi import FastAPI, HTTPException # type: ignore
 from pydantic import BaseModel # type: ignore
 import requests # type: ignore
 import os
 from dotenv import load_dotenv  # type: ignore
+from datetime import date
 
-# Carregar variáveis do .env
+# Carregar .env
 load_dotenv()
 GOOGLE_API_KEY = os.getenv("GOOGLE_API_KEY")
 CX = os.getenv("CX")
 APIFY_TOKEN = os.getenv("APIFY_TOKEN")
+
+
+# Contador
+request_count = 0
+current_day = date.today()
+
+MAX_REQUESTS_PER_DAY = 50
+
 
 app = FastAPI()
 
@@ -20,12 +29,34 @@ class Filtro(BaseModel):
     estilo: str | None = None
 
 
+cache = {} # armazenamento para caso o query ja tenha sido feito 
+
+
+# Controllers
 @app.post("/buscar-produtos")
 def buscar_produtos(filtro: Filtro):
+    
+    global request_count, current_day
+    
+    # reseta se mudou o dia
+    if date.today() != current_day:
+        current_day = date.today()
+        request_count = 0
+
+    # bloqueia se passar do limite
+    if request_count >= MAX_REQUESTS_PER_DAY:
+        raise HTTPException(status_code=429, detail="Limite diário atingido (50 requisições). Tente amanhã.")
+
+    request_count += 1
+    
+    
     query = " ".join([v for v in filtro.dict().values() if v])  # gera string da query
     resultados = {}
 
     # -------- Mercado Livre --------
+    if query in cache:
+        return cache[query]
+    
     url_ml = f"https://api.mercadolibre.com/sites/MLB/search?q={query}"
     resp_ml = requests.get(url_ml).json()
 
@@ -72,4 +103,5 @@ def buscar_produtos(filtro: Filtro):
         for item in resp_google.get("items", [])[:5]
     ]
 
+    cache[query] = resultados  # salva no cache
     return resultados
