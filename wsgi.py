@@ -1,12 +1,12 @@
-from fastapi import FastAPI, HTTPException, Request, UploadFile, File # type: ignore
-from fastapi.responses import JSONResponse # type: ignore 
-from pydantic import BaseModel # type: ignore
-import uvicorn # type: ignore
-import requests # type: ignore
+from fastapi import FastAPI, HTTPException, Request, UploadFile, File
+from fastapi.responses import JSONResponse 
+from pydantic import BaseModel 
+import uvicorn 
+import requests 
 import os
-import numpy as np # type: ignore
-import pandas as pd # type: ignore 
-from dotenv import load_dotenv  # type: ignore
+import numpy as np 
+import pandas as pd 
+from dotenv import load_dotenv
 from datetime import date
 from slowapi import Limiter
 from slowapi.util import get_remote_address
@@ -26,13 +26,14 @@ APIFY_TOKEN = os.getenv("APIFY_TOKEN")
 # Contador
 request_count = 0
 current_day = date.today()
-MAX_REQUESTS_PER_DAY = 50
+MAX_REQUESTS_PER_DAY = 1000
 app = FastAPI()
+
 # Modelo para entrada JSON
 class Filtro(BaseModel):
     categoria: str
     genero: str | None = None
-    cor: str | None = None
+    cor: str | None = None # nao vai existir
     estilo: str | None = None
 cache = {} # armazenamento para caso o query ja tenha sido feito 
 
