@@ -1,9 +1,20 @@
-from fastapi import FastAPI, HTTPException # type: ignore
+from fastapi import FastAPI, HTTPException, Request, UploadFile, File # type: ignore
+from fastapi.responses import JSONResponse # type: ignore 
 from pydantic import BaseModel # type: ignore
+import uvicorn # type: ignore
 import requests # type: ignore
 import os
+import numpy as np # type: ignore
+import pandas as pd # type: ignore 
 from dotenv import load_dotenv  # type: ignore
 from datetime import date
+from slowapi import Limiter
+from slowapi.util import get_remote_address
+from slowapi.errors import RateLimitExceeded
+import shutil
+import tensorflow as tf
+from PIL import Image
+
 
 # Carregar .env
 load_dotenv()
@@ -15,26 +26,45 @@ APIFY_TOKEN = os.getenv("APIFY_TOKEN")
 # Contador
 request_count = 0
 current_day = date.today()
-
 MAX_REQUESTS_PER_DAY = 50
-
-
 app = FastAPI()
-
 # Modelo para entrada JSON
 class Filtro(BaseModel):
     categoria: str
     genero: str | None = None
     cor: str | None = None
     estilo: str | None = None
-
-
 cache = {} # armazenamento para caso o query ja tenha sido feito 
 
+app = FastAPI()
 
-# Controllers
+limiter = Limiter(key_func=get_remote_address)
+app = FastAPI()
+app.state.limiter = limiter
+
+# Envio para a ia do colab 
+@app.post("/upload-image")
+async def predict(file: UploadFile = File(...)):
+    # Abrir a imagem recebida
+    image = Image.open(file.file).convert("L")  # "L" = grayscale
+    image = image.resize((28, 28))  # Fashion MNIST é 28x28
+    
+    # Converter para numpy array normalizado
+    img_array = np.array(image) / 255.0
+    img_array = img_array.reshape(1, 28, 28)  # Batch de 1 imagem
+
+    # Fazer a predição
+    predictions = model.predict(img_array)
+    predicted_class = class_names[np.argmax(predictions[0])]
+    confidence = float(np.max(predictions[0]))
+
+    return {"classe_predita": predicted_class, "confianca": confidence}
+    
+
+# Busca de produtos 
 @app.post("/buscar-produtos")
-def buscar_produtos(filtro: Filtro):
+@limiter.limit("50/day") 
+def buscar_produtos(request: Request, filtro: Filtro):
     
     global request_count, current_day
     
@@ -105,3 +135,5 @@ def buscar_produtos(filtro: Filtro):
 
     cache[query] = resultados  # salva no cache
     return resultados
+
+
