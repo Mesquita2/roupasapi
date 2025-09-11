@@ -106,6 +106,8 @@ def buscar_produtos(request: Request, filtro: Filtro):
         resultados["shein"] = []
 
     # Google Shopping
+    
+    # Motivo do return ser apenas o google e pq nao price
     url_google = f"https://www.googleapis.com/customsearch/v1?q={query}&key={GOOGLE_API_KEY}&cx={CX}"
     resp_google = requests.get(url_google, timeout=10).json()
     resultados["google_shopping"] = [
@@ -114,6 +116,8 @@ def buscar_produtos(request: Request, filtro: Filtro):
          "snippet": i.get("snippet")}
         for i in resp_google.get("items", [])[:5]
     ]
+    
+    print(resultados)
 
     cache[query] = resultados
     return resultados
