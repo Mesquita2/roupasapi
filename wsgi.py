@@ -1,123 +1,178 @@
 from io import BytesIO
 import os
-os.environ["TF_CPP_MIN_LOG_LEVEL"] = "2"
-from fastapi import FastAPI, HTTPException, Request, UploadFile, File
-from fastapi.responses import JSONResponse
-from pydantic import BaseModel
-import uvicorn
-import requests
-import numpy as np
-from dotenv import load_dotenv
+import json
+import urllib.parse
 from datetime import date
+import numpy as np
+import requests
+import tensorflow as tf
+from fastapi import FastAPI, HTTPException, Request, UploadFile, File
+from pydantic import BaseModel
+from dotenv import load_dotenv
 from slowapi import Limiter
 from slowapi.util import get_remote_address
-import tensorflow as tf
 from PIL import Image
+import uvicorn
+import logging
 
-# Classes do Fashion MNIST
+# ---------------------------
+# 1) CONFIGURAÇÃO E VARIÁVEIS
+# ---------------------------
+load_dotenv()
+
+GOOGLE_API_KEY = os.getenv("GOOGLE_API_KEY")
+CX = os.getenv("CX")           # Pesquisa geral
+CX_SHEIN = os.getenv("CX_SHEIN")  # Pesquisa apenas Shein
+
+# Carregar modelo treinado (Fashion MNIST)
 class_names = ["T-shirt/top", "Trouser", "Pullover", "Dress", "Coat",
                "Sandal", "Shirt", "Sneaker", "Bag", "Ankle boot"]
-
-# Carregar modelo treinado
 model = tf.keras.models.load_model("fashion_model.keras")
 
-# Carregar .env
-load_dotenv()
-GOOGLE_API_KEY = os.getenv("GOOGLE_API_KEY")
-CX = os.getenv("CX")
-APIFY_TOKEN = os.getenv("APIFY_TOKEN")
-
+# Limite de requests
+MAX_REQUESTS_PER_DAY = 1000
 request_count = 0
 current_day = date.today()
-MAX_REQUESTS_PER_DAY = 1000
-cache = {}
 
+# FastAPI + rate limiting
 app = FastAPI()
 limiter = Limiter(key_func=get_remote_address)
 app.state.limiter = limiter
 
+# Configurar logging
+logging.basicConfig(level=logging.DEBUG)
+logger = logging.getLogger("produtos_debug")
+
+# ---------------------------
+# 2) MODEL PREDICTION
+# ---------------------------
+@app.post("/upload-image")
+async def predict(file: UploadFile = File(...)):
+    """Classifica a imagem com modelo Fashion MNIST"""
+    try:
+        contents = await file.read()
+        image = Image.open(BytesIO(contents)).convert("L")
+        image = image.resize((28, 28))
+        img_array = np.array(image).astype("float32") / 255.0
+        img_array = img_array.reshape(1, 28, 28, 1)
+
+        predictions = model.predict(img_array)
+        predicted_class = class_names[np.argmax(predictions[0])]
+        confidence = float(np.max(predictions[0]))
+        return {"classe_predita": predicted_class, "confianca": confidence}
+
+    except Exception as e:
+        return {"erro": f"Não foi possível processar a imagem: {str(e)}"}
+
+# ---------------------------
+# 3) BUSCA DE PRODUTOS
+# ---------------------------
 class Filtro(BaseModel):
     categoria: str
     genero: str | None = None
     cor: str | None = None
     estilo: str | None = None
 
-@app.post("/upload-image")
-async def predict(file: UploadFile = File(...)):
-    try:
-        # Ler o conteúdo do upload
-        contents = await file.read()
-        import io
-        image = Image.open(BytesIO(contents)).convert("L")  # grayscale
-        image = image.resize((28, 28))
-
-        # Converter para numpy array normalizado
-        img_array = np.array(image).astype("float32") / 255.0
-        img_array = img_array.reshape(1, 28, 28, 1)  # batch de 1, com canal
-
-        # Fazer predição
-        predictions = model.predict(img_array)
-        predicted_class = class_names[np.argmax(predictions[0])]
-        confidence = float(np.max(predictions[0]))
-
-        return {"classe_predita": predicted_class, "confianca": confidence}
-
-    except Exception as e:
-        return {"erro": f"Não foi possível processar a imagem: {str(e)}"}
-
 @app.post("/buscar-produtos")
 @limiter.limit("50/day")
 def buscar_produtos(request: Request, filtro: Filtro):
+    """Busca produtos no Google Shopping e Shein"""
     global request_count, current_day
 
+    # Reset diário do contador
     if date.today() != current_day:
         current_day = date.today()
         request_count = 0
 
     if request_count >= MAX_REQUESTS_PER_DAY:
-        raise HTTPException(status_code=429, detail="Limite diário atingido (50 requisições). Tente amanhã.")
+        raise HTTPException(status_code=429, detail="Limite diário atingido.")
     request_count += 1
+    logger.debug(f"Request count: {request_count}")
 
-    query = " ".join([v for v in filtro.dict().values() if v])
-    if query in cache:
-        return cache[query]
+    query = " ".join([v for v in filtro.model_dump().values() if v])
+    query_encoded = urllib.parse.quote_plus(query)
+    logger.debug(f"Query: {query}")
 
-    resultados = {}
+    resultados = {"google_shopping": [], "shein": []}
 
-    # Mercado Livre
-    url_ml = f"https://api.mercadolibre.com/sites/MLB/search?q={query}"
-    resp_ml = requests.get(url_ml, timeout=10).json()
-    resultados["mercado_livre"] = [
-        {"titulo": i.get("title"), "preco": i.get("price"), "url": i.get("permalink"), "imagem": i.get("thumbnail")}
-        for i in resp_ml.get("results", [])[:5]
-    ]
+    # Google Shopping geral
+    url_google = (
+        f"https://www.googleapis.com/customsearch/v1"
+        f"?q={query_encoded}&key={GOOGLE_API_KEY}&cx={CX}&gl=br&hl=pt-BR"
+    )
 
-    # Shein
-    actor_url = f"https://api.apify.com/v2/acts/factual_biscotti~shein-visual-search-actor/run-sync-get-dataset?token={APIFY_TOKEN}"
+    # Google Shopping Shein
+    url_shein = (
+        f"https://www.googleapis.com/customsearch/v1"
+        f"?q={query_encoded}&key={GOOGLE_API_KEY}&cx={CX_SHEIN}&gl=br&hl=pt-BR"
+    )
     try:
-        payload = {"searchTerm": query}
-        resp_shein = requests.post(actor_url, json=payload, timeout=10).json()
-        resultados["shein"] = [
-            {"titulo": i.get("name"), "preco": i.get("price", {}).get("amount"), "moeda": i.get("price", {}).get("currency"),
-             "url": i.get("url"), "imagem": i.get("imageUrl")}
-            for i in resp_shein.get("items", [])[:5]
-        ]
-    except Exception:
-        resultados["shein"] = []
+        # Google geral
+        resp_google = requests.get(url_google, timeout=10)
+        resp_google_json = resp_google.json()
+        google_items = []
+        for i in resp_google_json.get("items", [])[:5]:
+            pagemap = i.get("pagemap", {})
+            price = (
+                pagemap.get("offer", [{}])[0].get("price")
+                or pagemap.get("product", [{}])[0].get("price")
+                or pagemap.get("metatags", [{}])[0].get("product:price:amount")
+                or "N/A"
+            )
+            currency = (
+                pagemap.get("offer", [{}])[0].get("pricecurrency")
+                or pagemap.get("product", [{}])[0].get("pricecurrency")
+                or pagemap.get("metatags", [{}])[0].get("product:price:currency")
+                or ""
+            )
+            google_items.append({
+                "titulo": i.get("title"),
+                "url": i.get("link"),
+                "imagem": pagemap.get("cse_image", [{}])[0].get("src"),
+                "preco": price,
+                "moeda": currency,
+                "snippet": i.get("snippet"),
+            })
+        resultados["google_shopping"] = google_items
+        logger.debug(f"Google resultados: {google_items}")
 
-    # Google Shopping
-    
-    # Motivo do return ser apenas o google e pq nao price
-    url_google = f"https://www.googleapis.com/customsearch/v1?q={query}&key={GOOGLE_API_KEY}&cx={CX}"
-    resp_google = requests.get(url_google, timeout=10).json()
-    resultados["google_shopping"] = [
-        {"titulo": i.get("title"), "url": i.get("link"),
-         "imagem": i.get("pagemap", {}).get("cse_image", [{}])[0].get("src"),
-         "snippet": i.get("snippet")}
-        for i in resp_google.get("items", [])[:5]
-    ]
-    
-    print(resultados)
+        # Google + Shein
+        resp_shein = requests.get(url_shein, timeout=10)
+        resp_shein_json = resp_shein.json()
+        shein_items = []
+        for i in resp_shein_json.get("items", [])[:5]:
+            pagemap = i.get("pagemap", {})
+            price = (
+                pagemap.get("offer", [{}])[0].get("price")
+                or pagemap.get("product", [{}])[0].get("price")
+                or pagemap.get("metatags", [{}])[0].get("product:price:amount")
+                or "N/A"
+            )
+            currency = (
+                pagemap.get("offer", [{}])[0].get("pricecurrency")
+                or pagemap.get("product", [{}])[0].get("pricecurrency")
+                or pagemap.get("metatags", [{}])[0].get("product:price:currency")
+                or ""
+            )
+            shein_items.append({
+                "titulo": i.get("title"),
+                "url": i.get("link"),
+                "imagem": pagemap.get("cse_image", [{}])[0].get("src"),
+                "preco": price,
+                "moeda": currency,
+                "snippet": i.get("snippet"),
+            })
+        resultados["shein"] = shein_items
+        logger.debug(f"Shein resultados: {shein_items}")
 
-    cache[query] = resultados
+    except Exception as e:
+        logger.error(f"Erro Google API: {e}")
+        raise HTTPException(status_code=500, detail=f"Erro Google API: {e}")
+
     return resultados
+
+# ---------------------------
+# 4) RODAR LOCALMENTE
+# ---------------------------
+if __name__ == "__main__":
+    uvicorn.run(app, host="127.0.0.1", port=8000, reload=True)
