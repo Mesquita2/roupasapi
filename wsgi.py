@@ -1,4 +1,5 @@
 from io import BytesIO
+import json
 import os
 import urllib.parse
 from datetime import date
@@ -23,9 +24,11 @@ CX_SHEIN = os.getenv("CX_SHEIN")     # Pesquisa apenas Shein
 CX_SHOPEE = os.getenv("CX_SHOPEE")   # Pesquisa apenas Shopee
 
 # Carregar modelo treinado (Fashion MNIST)
-class_names = ["T-shirt/top", "Trouser", "Pullover", "Dress", "Coat",
-               "Sandal", "Shirt", "Sneaker", "Bag", "Ankle boot"]
-model = tf.keras.models.load_model("fashion_model.keras")
+model = tf.keras.models.load_model("modelo_roupas.keras")
+with open("class_names.json", "r", encoding="utf-8") as f:
+    idx_to_label = json.load(f)
+IMG_SIZE = 128
+
 
 # Limite de requests
 MAX_REQUESTS_PER_DAY = 1000
@@ -45,22 +48,28 @@ logger = logging.getLogger("produtos_debug")
 
 @app.post("/upload-image")
 async def predict(file: UploadFile = File(...)):
-    """Classifica a imagem com modelo Fashion MNIST"""
+    """Classifica a imagem de roupa com modelo DeepFashion"""
     try:
         contents = await file.read()
-        image = Image.open(BytesIO(contents)).convert("L")
-        image = image.resize((28, 28))
+        image = Image.open(BytesIO(contents)).convert("RGB")
+        image = image.resize((IMG_SIZE, IMG_SIZE))
         img_array = np.array(image).astype("float32") / 255.0
-        img_array = img_array.reshape(1, 28, 28, 1)
+        img_array = np.expand_dims(img_array, axis=0)  # (1, 128, 128, 3)
 
+        # Fazer predição
         predictions = model.predict(img_array)
-        predicted_class = class_names[np.argmax(predictions[0])]
+        predicted_idx = int(np.argmax(predictions[0]))
+        predicted_class = idx_to_label[str(predicted_idx)]
         confidence = float(np.max(predictions[0]))
-        return {"classe_predita": predicted_class, "confianca": confidence}
+
+        return {
+            "classe_predita": predicted_class,
+            "confianca": confidence
+        }
 
     except Exception as e:
         return {"erro": f"Não foi possível processar a imagem: {str(e)}"}
-
+    
 # BUSCA DE PRODUTOS
 
 class Filtro(BaseModel):
