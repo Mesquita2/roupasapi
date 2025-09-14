@@ -1,6 +1,5 @@
 from io import BytesIO
 import os
-import json
 import urllib.parse
 from datetime import date
 import numpy as np
@@ -15,14 +14,13 @@ from PIL import Image
 import uvicorn
 import logging
 
-# ---------------------------
-# 1) CONFIGURAÇÃO E VARIÁVEIS
-# ---------------------------
+# CONFIGURAÇÃO E VARIÁVEIS
 load_dotenv()
 
 GOOGLE_API_KEY = os.getenv("GOOGLE_API_KEY")
-CX = os.getenv("CX")           # Pesquisa geral
-CX_SHEIN = os.getenv("CX_SHEIN")  # Pesquisa apenas Shein
+CX = os.getenv("CX")                 # Pesquisa geral
+CX_SHEIN = os.getenv("CX_SHEIN")     # Pesquisa apenas Shein
+CX_SHOPEE = os.getenv("CX_SHOPEE")   # Pesquisa apenas Shopee
 
 # Carregar modelo treinado (Fashion MNIST)
 class_names = ["T-shirt/top", "Trouser", "Pullover", "Dress", "Coat",
@@ -43,9 +41,8 @@ app.state.limiter = limiter
 logging.basicConfig(level=logging.DEBUG)
 logger = logging.getLogger("produtos_debug")
 
-# ---------------------------
-# 2) MODEL PREDICTION
-# ---------------------------
+# MODEL PREDICTION
+
 @app.post("/upload-image")
 async def predict(file: UploadFile = File(...)):
     """Classifica a imagem com modelo Fashion MNIST"""
@@ -64,9 +61,8 @@ async def predict(file: UploadFile = File(...)):
     except Exception as e:
         return {"erro": f"Não foi possível processar a imagem: {str(e)}"}
 
-# ---------------------------
-# 3) BUSCA DE PRODUTOS
-# ---------------------------
+# BUSCA DE PRODUTOS
+
 class Filtro(BaseModel):
     categoria: str
     genero: str | None = None
@@ -76,7 +72,7 @@ class Filtro(BaseModel):
 @app.post("/buscar-produtos")
 @limiter.limit("50/day")
 def buscar_produtos(request: Request, filtro: Filtro):
-    """Busca produtos no Google Shopping e Shein"""
+    """Busca produtos no Google Shopping, Shein e Shopee"""
     global request_count, current_day
 
     # Reset diário do contador
@@ -93,77 +89,70 @@ def buscar_produtos(request: Request, filtro: Filtro):
     query_encoded = urllib.parse.quote_plus(query)
     logger.debug(f"Query: {query}")
 
-    resultados = {"google_shopping": [], "shein": []}
+    resultados = {"google_shopping": [], "shein": [], "shopee": []}
 
-    # Google Shopping geral
     url_google = (
         f"https://www.googleapis.com/customsearch/v1"
         f"?q={query_encoded}&key={GOOGLE_API_KEY}&cx={CX}&gl=br&hl=pt-BR"
     )
 
-    # Google Shopping Shein
     url_shein = (
         f"https://www.googleapis.com/customsearch/v1"
         f"?q={query_encoded}&key={GOOGLE_API_KEY}&cx={CX_SHEIN}&gl=br&hl=pt-BR"
     )
-    try:
-        # Google geral
-        resp_google = requests.get(url_google, timeout=10)
-        resp_google_json = resp_google.json()
-        google_items = []
-        for i in resp_google_json.get("items", [])[:5]:
-            pagemap = i.get("pagemap", {})
-            price = (
-                pagemap.get("offer", [{}])[0].get("price")
-                or pagemap.get("product", [{}])[0].get("price")
-                or pagemap.get("metatags", [{}])[0].get("product:price:amount")
-                or "N/A"
-            )
-            currency = (
-                pagemap.get("offer", [{}])[0].get("pricecurrency")
-                or pagemap.get("product", [{}])[0].get("pricecurrency")
-                or pagemap.get("metatags", [{}])[0].get("product:price:currency")
-                or ""
-            )
-            google_items.append({
-                "titulo": i.get("title"),
-                "url": i.get("link"),
-                "imagem": pagemap.get("cse_image", [{}])[0].get("src"),
-                "preco": price,
-                "moeda": currency,
-                "snippet": i.get("snippet"),
-            })
-        resultados["google_shopping"] = google_items
-        logger.debug(f"Google resultados: {google_items}")
 
-        # Google + Shein
-        resp_shein = requests.get(url_shein, timeout=10)
-        resp_shein_json = resp_shein.json()
-        shein_items = []
-        for i in resp_shein_json.get("items", [])[:5]:
+    url_shopee = (
+        f"https://www.googleapis.com/customsearch/v1"
+        f"?q={query_encoded}&key={GOOGLE_API_KEY}&cx={CX_SHOPEE}&gl=br&hl=pt-BR"
+    )
+
+    def extrair_preco(pagemap: dict):
+        price = None
+        currency = None
+
+        if "offer" in pagemap:
+            offer = pagemap.get("offer", [{}])[0]
+            price = offer.get("price")
+            currency = offer.get("pricecurrency") or offer.get("priceCurrency")
+        if not price and "product" in pagemap:
+            product = pagemap.get("product", [{}])[0]
+            price = product.get("price")
+            currency = product.get("pricecurrency") or product.get("priceCurrency")
+        if not price and "metatags" in pagemap:
+            meta = pagemap.get("metatags", [{}])[0]
+            price = meta.get("product:price:amount") or meta.get("og:price:amount")
+            currency = meta.get("product:price:currency") or meta.get("og:price:currency")
+
+        return price or "N/A", currency or ""
+
+    def processar_resultados(json_data):
+        items = []
+        for i in json_data.get("items", [])[:5]:
             pagemap = i.get("pagemap", {})
-            price = (
-                pagemap.get("offer", [{}])[0].get("price")
-                or pagemap.get("product", [{}])[0].get("price")
-                or pagemap.get("metatags", [{}])[0].get("product:price:amount")
-                or "N/A"
-            )
-            currency = (
-                pagemap.get("offer", [{}])[0].get("pricecurrency")
-                or pagemap.get("product", [{}])[0].get("pricecurrency")
-                or pagemap.get("metatags", [{}])[0].get("product:price:currency")
-                or ""
-            )
-            shein_items.append({
+            preco, moeda = extrair_preco(pagemap)
+            items.append({
                 "titulo": i.get("title"),
                 "url": i.get("link"),
-                "imagem": pagemap.get("cse_image", [{}])[0].get("src"),
-                "preco": price,
-                "moeda": currency,
+                "imagem": (pagemap.get("cse_image", [{}])[0].get("src")
+                           if "cse_image" in pagemap else None),
+                "preco": preco,
+                "moeda": moeda,
                 "snippet": i.get("snippet"),
             })
-        resultados["shein"] = shein_items
-        logger.debug(f"Shein resultados: {shein_items}")
+        return items
+
+    try:
+        # Google Shopping
+        resp_google = requests.get(url_google, timeout=10).json()
+        resultados["google_shopping"] = processar_resultados(resp_google)
+
+        # Shein
+        resp_shein = requests.get(url_shein, timeout=10).json()
+        resultados["shein"] = processar_resultados(resp_shein)
+
+        # Shopee
+        resp_shopee = requests.get(url_shopee, timeout=10).json()
+        resultados["shopee"] = processar_resultados(resp_shopee)
 
     except Exception as e:
         logger.error(f"Erro Google API: {e}")
@@ -171,8 +160,6 @@ def buscar_produtos(request: Request, filtro: Filtro):
 
     return resultados
 
-# ---------------------------
-# 4) RODAR LOCALMENTE
-# ---------------------------
+
 if __name__ == "__main__":
     uvicorn.run(app, host="127.0.0.1", port=8000, reload=True)
